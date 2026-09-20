@@ -1,0 +1,28 @@
+{
+  "id": "skinsrestorer",
+  "name": "SkinsRestorer",
+  "version": "${version}",
+  "description": "${description}",
+  "url": "${url}",
+  "authors": [
+    "knat",
+    "AlexProgrammerDE",
+    "Blackfire62",
+    "McLive"
+  ],
+  "dependencies": [
+    {
+      "id": "floodgate",
+      "optional": true
+    },
+    {
+      "id": "miniplaceholders",
+      "optional": true
+    },
+    {
+      "id": "viaversion",
+      "optional": true
+    }
+  ],
+  "main": "net.skinsrestorer.velocity.SRVelocityBootstrap"
+}

@@ -1,0 +1,40 @@
+{
+  "extends": [
+    "config:recommended",
+    "group:allNonMajor",
+    ":semanticCommits"
+  ],
+  "baseBranches": [
+    "dev"
+  ],
+  "reviewers": [
+    "xknat"
+  ],
+  "ignoreDeps": [
+    "org.spigotmc:spigot-api",
+    "net.fabricmc.fabric-api:fabric-api-bom",
+    "net.fabricmc.fabric-api:fabric-api",
+    "dev.architectury.loom-no-remap"
+  ],
+  "labels": [
+    "renovate"
+  ],
+  "packageRules": [
+    {
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "automerge": true,
+      "automergeType": "branch"
+    },
+    {
+      "matchPackageNames": [
+        "**"
+      ],
+      "allowedVersions": "!/\\-SNAPSHOT$/"
+    }
+  ]
+}
