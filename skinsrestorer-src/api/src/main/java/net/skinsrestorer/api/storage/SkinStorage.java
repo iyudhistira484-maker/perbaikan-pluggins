@@ -99,11 +99,13 @@ public interface SkinStorage {
      * @param response MineSkinResponse object
      */
     default void setURLSkinByResponse(String url, MineSkinResponse response) {
+        SkinVariant skinVariant = response.resolveVariant();
+
         if (response.getRequestedVariant() == null) {
-            setURLSkinIndex(url, response.getGeneratedVariant());
+            setURLSkinIndex(url, skinVariant);
         }
 
-        setURLSkinData(url, response.getMineSkinId(), response.getProperty(), response.getGeneratedVariant());
+        setURLSkinData(url, response.getMineSkinId(), response.getProperty(), skinVariant);
     }
 
     /**

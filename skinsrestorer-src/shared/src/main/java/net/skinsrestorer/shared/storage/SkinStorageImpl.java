@@ -41,6 +41,7 @@ import net.skinsrestorer.shared.subjects.messages.ComponentString;
 import net.skinsrestorer.shared.utils.SRHelpers;
 import net.skinsrestorer.shared.utils.UUIDUtils;
 import net.skinsrestorer.shared.utils.ValidationUtil;
+import org.jetbrains.annotations.Nullable;
 
 import javax.inject.Inject;
 import java.time.Instant;
@@ -340,10 +341,16 @@ public class SkinStorageImpl implements SkinStorage {
             return Optional.of(InputDataResult.of(SkinIdentifier.ofCustom(input), skinProperty));
         } else if (ValidationUtil.validSkinUrl(input)) {
             MineSkinResponse response = mineSkinAPI.genSkin(input, skinVariantHint);
+            SkinVariant skinVariant = response.resolveVariant();
 
             setURLSkinByResponse(input, response);
 
-            return Optional.of(InputDataResult.of(SkinIdentifier.ofURL(input, response.getGeneratedVariant()), response.getProperty()));
+            // An explicit variant on the command does not write the url index, which left the cache
+            // empty for lookups without a variant hint and made MineSkin generate the same url over
+            // and over. Make sure the index exists so the generated skin stays reusable.
+            ensureURLSkinIndex(input, skinVariant);
+
+            return Optional.of(InputDataResult.of(SkinIdentifier.ofURL(input, skinVariant), response.getProperty()));
         } else if (typeHint != SkinType.CUSTOM) {
             return getPlayerSkin(input, false, true).map(result ->
                     InputDataResult.of(SkinIdentifier.ofPlayer(result.getUniqueId()), result.getSkinProperty()));
@@ -358,9 +365,7 @@ public class SkinStorageImpl implements SkinStorage {
             return switch (identifier.getSkinType()) {
                 case PLAYER -> adapterReference.get().getPlayerSkinData(identifier.getPlayerUniqueId())
                         .map(PlayerSkinData::getProperty);
-                case URL ->
-                        adapterReference.get().getURLSkinData(identifier.getIdentifier(), identifier.getSkinVariant())
-                                .map(URLSkinData::getProperty);
+                case URL -> findURLSkinData(identifier).map(URLSkinData::getProperty);
                 case CUSTOM -> {
                     if (identifier.getIdentifier().startsWith(RECOMMENDATION_PREFIX)) {
                         String skinId = identifier.getIdentifier().substring(RECOMMENDATION_PREFIX.length());
@@ -396,10 +401,74 @@ public class SkinStorageImpl implements SkinStorage {
     public void removeSkinData(SkinIdentifier identifier) {
         switch (identifier.getSkinType()) {
             case PLAYER -> adapterReference.get().removePlayerSkinData(identifier.getPlayerUniqueId());
-            case URL ->
-                    adapterReference.get().removeURLSkinData(identifier.getIdentifier(), identifier.getSkinVariant());
+            case URL -> removeURLSkinData(identifier);
             case CUSTOM -> adapterReference.get().removeCustomSkinData(identifier.getIdentifier());
             case LEGACY -> adapterReference.get().removeLegacySkinData(identifier.getIdentifier());
+        }
+    }
+
+    /**
+     * Resolves the storage entry of a url skin.
+     * <p>
+     * Skin variants are part of the key an url skin is stored under. Older entries (and skins stored
+     * by third party API users) can be missing the variant, which used to throw a NullPointerException
+     * and left the player without a skin. Fall back to the url index, and finally to every known
+     * variant, so an existing skin keeps working instead of silently showing the default skin.
+     */
+    private Optional<URLSkinData> findURLSkinData(SkinIdentifier identifier) throws StorageAdapter.StorageException {
+        SkinVariant skinVariant = resolveSkinVariant(identifier);
+        if (skinVariant != null) {
+            return adapterReference.get().getURLSkinData(identifier.getIdentifier(), skinVariant);
+        }
+
+        for (SkinVariant variant : SkinVariant.values()) {
+            Optional<URLSkinData> skinData = adapterReference.get().getURLSkinData(identifier.getIdentifier(), variant);
+            if (skinData.isPresent()) {
+                return skinData;
+            }
+        }
+
+        logger.debug("Could not find any stored data for url skin %s, the skin has to be set again."
+                .formatted(identifier.getIdentifier()));
+        return Optional.empty();
+    }
+
+    private void removeURLSkinData(SkinIdentifier identifier) {
+        try {
+            SkinVariant skinVariant = resolveSkinVariant(identifier);
+            if (skinVariant == null) {
+                // Without a variant we cannot target a single entry, so drop the index and every
+                // variant of this url instead of leaving broken data behind.
+                adapterReference.get().removeURLSkinIndex(identifier.getIdentifier());
+                for (SkinVariant variant : SkinVariant.values()) {
+                    adapterReference.get().removeURLSkinData(identifier.getIdentifier(), variant);
+                }
+                return;
+            }
+
+            adapterReference.get().removeURLSkinData(identifier.getIdentifier(), skinVariant);
+        } catch (StorageAdapter.StorageException e) {
+            logger.warning("Failed to remove url skin data for %s".formatted(identifier.getIdentifier()), e);
+        }
+    }
+
+    private @Nullable SkinVariant resolveSkinVariant(SkinIdentifier identifier) throws StorageAdapter.StorageException {
+        if (identifier.getSkinVariant() != null) {
+            return identifier.getSkinVariant();
+        }
+
+        return adapterReference.get().getURLSkinIndex(identifier.getIdentifier())
+                .map(URLIndexData::getSkinVariant)
+                .orElse(null);
+    }
+
+    private void ensureURLSkinIndex(String url, SkinVariant skinVariant) {
+        try {
+            if (adapterReference.get().getURLSkinIndex(url).isEmpty()) {
+                setURLSkinIndex(url, skinVariant);
+            }
+        } catch (StorageAdapter.StorageException e) {
+            logger.warning("Failed to check the url skin index of %s".formatted(url), e);
         }
     }
 

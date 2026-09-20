@@ -389,6 +389,9 @@ public class SRPlugin {
     public void registerFloodgate() {
         if (ReflectionUtil.classExists("org.geysermc.floodgate.api.FloodgateApi")) {
             FloodgateUtil.registerListener(injector);
+        } else {
+            // Only relevant for servers that run Geyser, so this stays at debug level.
+            logger.debug("Floodgate is not installed, skipping the Bedrock skin listener.");
         }
     }
 

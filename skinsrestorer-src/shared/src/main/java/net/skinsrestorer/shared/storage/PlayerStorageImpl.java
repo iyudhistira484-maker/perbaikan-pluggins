@@ -242,6 +242,13 @@ public class PlayerStorageImpl implements PlayerStorage {
 
         if (FloodgateUtil.isFloodgateBedrockPlayer(uuid)) {
             logger.debug("Player %s is a Floodgate player, not searching for java skin.".formatted(playerName));
+
+            // Bedrock players have no Java (Mojang) skin to fall back to, but they should still be
+            // able to receive the skins configured with 'storage.defaultSkins'.
+            if (settings.getProperty(StorageConfig.DEFAULT_SKINS_ENABLED)) {
+                return getDefaultSkin();
+            }
+
             return Optional.empty();
         }
 

@@ -29,4 +29,21 @@ public class MineSkinResponse {
     private final String mineSkinId;
     private final SkinVariant requestedVariant;
     private final SkinVariant generatedVariant;
+
+    /**
+     * The variant that should be used to store and look up this skin.
+     * <p>
+     * Never null: it falls back to the requested variant and finally to {@link SkinVariant#CLASSIC}.
+     * Storing a url skin without a variant used to result in unreadable storage entries, because
+     * the variant is part of the key that the skin is saved under.
+     *
+     * @return the variant to store this skin under
+     */
+    public SkinVariant resolveVariant() {
+        if (generatedVariant != null) {
+            return generatedVariant;
+        }
+
+        return requestedVariant != null ? requestedVariant : SkinVariant.CLASSIC;
+    }
 }

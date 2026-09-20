@@ -117,6 +117,11 @@ public class MineSkinAPIImpl implements MineSkinAPI {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new DataRequestExceptionShared(e);
+        } catch (RuntimeException e) {
+            // An unexpected response (for example invalid json) should be reported as a normal
+            // request failure instead of breaking the command with an internal error.
+            logger.warning("[ERROR] MineSkin Failed! Unexpected error (%s)".formatted(imageUrl), e);
+            throw new DataRequestExceptionShared(e);
         }
 
         throw new MineSkinExceptionShared(Message.ERROR_MS_API_FAILED);
@@ -127,19 +132,19 @@ public class MineSkinAPIImpl implements MineSkinAPI {
         logger.debug("MineSkinAPI: Response: %s".formatted(httpResponse));
 
         MineSkinUrlResponse response = httpResponse.getBodyAs(MineSkinUrlResponse.class);
+        if (response == null) {
+            logger.debug(SRLogLevel.WARNING, "[ERROR] MineSkin Failed! Empty response (Image URL: %s)".formatted(imageUrl));
+            throw new MineSkinExceptionShared(Message.ERROR_MS_API_FAILED);
+        }
 
         MineSkinUrlResponse.RateLimit rateLimit = response.getRateLimit();
-        if (rateLimit != null) {
+        if (rateLimit != null && rateLimit.getNext() != null) {
             long serverNextRequestAt = System.currentTimeMillis() + rateLimit.getNext().getRelative();
             nextRequestAt.updateAndGet(currentValue -> Math.max(currentValue, serverNextRequestAt));
         }
 
         if (response.isSuccess()) {
-            MineSkinUrlResponse.Skin skin = response.getSkin();
-            MineSkinUrlResponse.Skin.Texture.Data textureData = skin.getTexture().getData();
-            SkinProperty property = SkinProperty.of(textureData.getValue(), textureData.getSignature());
-            return Optional.of(MineSkinResponse.of(property, skin.getUuid(),
-                    skinVariant, PropertyUtils.getSkinVariant(property)));
+            return Optional.of(toMineSkinResponse(response.getSkin(), skinVariant, imageUrl));
         } else {
             for (MineSkinUrlResponse.Error error : response.getErrors()) {
                 logger.debug("[ERROR] MineSkin Failed! Reason: %s Image URL: %s".formatted(error, imageUrl));
@@ -224,22 +229,65 @@ public class MineSkinAPIImpl implements MineSkinAPI {
             }
 
             MineSkinUrlResponse.Skin skin = response.getSkin();
-            if (skin == null || skin.getTexture() == null || skin.getTexture().getData() == null) {
+            if (skin == null) {
                 logger.debug(SRLogLevel.WARNING, "MineSkin short link %s did not contain any skin data, falling back to generating a new skin.".formatted(imageUrl));
                 return Optional.empty();
             }
 
-            MineSkinUrlResponse.Skin.Texture.Data textureData = skin.getTexture().getData();
-            SkinProperty property = SkinProperty.of(textureData.getValue(), textureData.getSignature());
+            MineSkinResponse resolved;
+            try {
+                resolved = toMineSkinResponse(skin, skinVariant, imageUrl);
+            } catch (MineSkinException e) {
+                // The link resolved, but the skin behind it is not usable. Let the normal generation
+                // request try again before giving up.
+                logger.debug(SRLogLevel.WARNING, "MineSkin short link %s did not contain a usable skin, falling back to generating a new skin.".formatted(imageUrl));
+                return Optional.empty();
+            }
 
             logger.debug("Resolved MineSkin short link %s to skin %s without generating a new skin.".formatted(imageUrl, skin.getUuid()));
 
-            return Optional.of(MineSkinResponse.of(property, skin.getUuid(),
-                    skinVariant, PropertyUtils.getSkinVariant(property)));
+            if (skinVariant != null && resolved.getGeneratedVariant() != null && skinVariant != resolved.getGeneratedVariant()) {
+                // The skin behind the link was generated as another variant, and we cannot regenerate
+                // it without the original image. Tell the user why the model is not what they asked for.
+                logger.debug(SRLogLevel.WARNING, "The skin behind %s is a %s skin, so the requested %s variant is ignored."
+                        .formatted(imageUrl, resolved.getGeneratedVariant(), skinVariant));
+            }
+
+            return Optional.of(resolved);
         } catch (IOException e) {
             logger.debug(SRLogLevel.WARNING, "Failed to resolve MineSkin short link %s, falling back to generating a new skin.".formatted(imageUrl), e);
             return Optional.empty();
         }
+    }
+
+    /**
+     * Converts a MineSkin skin into a response, making sure the returned property can actually be
+     * rendered by a Minecraft client.
+     * <p>
+     * A skin without a texture value or signature would be stored and applied anyway, which leaves
+     * the player with their old/default skin while the command still reports success. Failing here
+     * turns that silent breakage into a clear error message instead.
+     */
+    private MineSkinResponse toMineSkinResponse(MineSkinUrlResponse.Skin skin, @Nullable SkinVariant skinVariant, String imageUrl) throws MineSkinException {
+        MineSkinUrlResponse.Skin.Texture texture = skin == null ? null : skin.getTexture();
+        MineSkinUrlResponse.Skin.Texture.Data textureData = texture == null ? null : texture.getData();
+        String value = textureData == null ? null : textureData.getValue();
+        String signature = textureData == null ? null : textureData.getSignature();
+
+        if (value == null || value.isEmpty() || signature == null || signature.isEmpty()) {
+            logger.debug(SRLogLevel.WARNING, "MineSkin returned an incomplete skin for %s (value present: %s, signature present: %s)"
+                    .formatted(imageUrl, value != null, signature != null));
+            throw new MineSkinExceptionShared(Message.ERROR_MS_API_FAILED);
+        }
+
+        if (!PropertyUtils.hasSkinTexture(value)) {
+            logger.debug(SRLogLevel.WARNING, "MineSkin returned a skin without a readable texture for %s".formatted(imageUrl));
+            throw new MineSkinExceptionShared(Message.ERROR_MS_API_FAILED);
+        }
+
+        SkinProperty property = SkinProperty.of(value, signature);
+        return MineSkinResponse.of(property, skin == null || skin.getUuid() == null ? "" : skin.getUuid(),
+                skinVariant, PropertyUtils.getSkinVariant(property));
     }
 
     /**

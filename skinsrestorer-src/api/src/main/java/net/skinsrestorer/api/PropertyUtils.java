@@ -19,7 +19,9 @@ package net.skinsrestorer.api;
 
 import com.google.gson.Gson;
 import net.skinsrestorer.api.model.MojangProfileResponse;
+import net.skinsrestorer.api.model.MojangProfileTexture;
 import net.skinsrestorer.api.model.MojangProfileTextureMeta;
+import net.skinsrestorer.api.model.MojangProfileTextures;
 import net.skinsrestorer.api.property.SkinProperty;
 import net.skinsrestorer.api.property.SkinVariant;
 import org.jetbrains.annotations.NotNull;
@@ -104,11 +106,51 @@ public final class PropertyUtils {
     }
 
     public static SkinVariant getSkinVariant(@NotNull String base64) {
-        MojangProfileTextureMeta meta = getSkinProfileData(base64).getTextures().getSKIN().getMetadata();
+        MojangProfileTexture texture = getSkinTexture(base64);
+        MojangProfileTextureMeta meta = texture == null || texture.getMetadata() == null ? null : texture.getMetadata();
         if (meta == null) {
             return SkinVariant.CLASSIC;
         }
 
         return "slim".equalsIgnoreCase(meta.getModel()) ? SkinVariant.SLIM : SkinVariant.CLASSIC;
+    }
+
+    /**
+     * Returns whether the given profile value actually contains a skin texture.
+     * <p>
+     * Profile values that are empty, malformed or only contain a cape cannot be rendered by the
+     * client, so they should never be stored or applied.
+     *
+     * @param base64 Profile value
+     * @return true if the value contains a skin texture url
+     */
+    public static boolean hasSkinTexture(@NotNull String base64) {
+        MojangProfileTexture texture = getSkinTexture(base64);
+        return texture != null && texture.getUrl() != null && !texture.getUrl().isEmpty();
+    }
+
+    /**
+     * Returns whether the given property actually contains a skin texture.
+     *
+     * @param property Skin property
+     * @return true if the property contains a skin texture url
+     * @see #hasSkinTexture(String)
+     */
+    public static boolean hasSkinTexture(@NotNull SkinProperty property) {
+        return hasSkinTexture(property.getValue());
+    }
+
+    private static MojangProfileTexture getSkinTexture(@NotNull String base64) {
+        MojangProfileResponse profileData;
+        MojangProfileTextures textures;
+        try {
+            profileData = getSkinProfileData(base64);
+            textures = profileData == null ? null : profileData.getTextures();
+        } catch (RuntimeException e) {
+            // A malformed base64 value or unexpected json should never crash the caller.
+            return null;
+        }
+
+        return textures == null ? null : textures.getSKIN();
     }
 }
