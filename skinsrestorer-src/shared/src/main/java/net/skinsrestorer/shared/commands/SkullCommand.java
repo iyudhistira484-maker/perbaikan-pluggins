@@ -45,7 +45,6 @@ import net.skinsrestorer.shared.config.AdvancedConfig;
 import net.skinsrestorer.shared.config.CommandConfig;
 import net.skinsrestorer.shared.connections.RecommendationsState;
 import net.skinsrestorer.shared.connections.responses.RecommenationResponse;
-import net.skinsrestorer.shared.log.SRLogLevel;
 import net.skinsrestorer.shared.log.SRLogger;
 import net.skinsrestorer.shared.plugin.SRPlatformAdapter;
 import net.skinsrestorer.shared.plugin.SRPlugin;
@@ -249,8 +248,10 @@ public final class SkullCommand {
         } catch (DataRequestException e) {
             ComponentHelper.sendException(e, sender, locale, logger);
         } catch (MineSkinException e) {
-            logger.debug(SRLogLevel.SEVERE, "Could not generate skin url: %s".formatted(skinInput), e);
-            sender.sendMessage(Message.ERROR_INVALID_URLSKIN);
+            logger.warning("Could not generate skin url: %s".formatted(skinInput), e);
+            // Report the reason carried by the exception instead of always blaming the url format, so
+            // failures like an unreachable image, a full MineSkin queue or a missing api key are shown.
+            ComponentHelper.sendException(e, sender, locale, logger);
         }
 
         setCoolDown(sender, CommandConfig.SKULL_ERROR_COOLDOWN);

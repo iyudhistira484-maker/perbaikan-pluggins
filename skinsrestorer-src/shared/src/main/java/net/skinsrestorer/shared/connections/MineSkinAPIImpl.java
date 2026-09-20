@@ -20,6 +20,7 @@ package net.skinsrestorer.shared.connections;
 import ch.jalu.configme.SettingsManager;
 import com.google.gson.Gson;
 import lombok.RequiredArgsConstructor;
+import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.skinsrestorer.api.PropertyUtils;
 import net.skinsrestorer.api.connections.MineSkinAPI;
 import net.skinsrestorer.api.connections.model.MineSkinResponse;
@@ -46,11 +47,14 @@ import org.jetbrains.annotations.Nullable;
 import javax.inject.Inject;
 import java.io.IOException;
 import java.net.URI;
+import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -62,6 +66,8 @@ public class MineSkinAPIImpl implements MineSkinAPI {
     private static final int MAX_RETRIES = 5;
     private static final String MINESKIN_USER_AGENT = "SkinsRestorer/MineSkinAPI";
     private static final URI MINESKIN_ENDPOINT = URI.create("https://api.mineskin.org/v2/generate");
+    private static final URI MINESKIN_SKIN_ENDPOINT = URI.create("https://api.mineskin.org/v2/skins/");
+    private static final Set<String> MINESKIN_SHORT_LINK_HOSTS = Set.of("minesk.in", "mineskin.org", "www.mineskin.org");
     private static final URI AXOLOTL_DECRYPT_ENDPOINT = URI.create("https://axolotl.skinsrestorer.net/mineskin/decrypt-url");
     private final Semaphore semaphore = new Semaphore(5);
     private final Gson gson = new Gson();
@@ -75,6 +81,15 @@ public class MineSkinAPIImpl implements MineSkinAPI {
     public MineSkinResponse genSkin(String imageUrl, @Nullable SkinVariant skinVariant) throws DataRequestException, MineSkinException {
         imageUrl = decryptAxolotlUrl(imageUrl);
         imageUrl = SRHelpers.sanitizeImageURL(imageUrl);
+
+        // The skin upload page (https://skinsrestorer.net/upload) hands out MineSkin short links that
+        // redirect to an HTML page instead of to an image, so MineSkin cannot download them again
+        // ("invalid_image_url"). The skin behind such a link already exists, so resolve it directly
+        // instead of asking MineSkin to generate it a second time.
+        Optional<MineSkinResponse> existingSkin = resolveMineSkinShortLink(imageUrl, skinVariant);
+        if (existingSkin.isPresent()) {
+            return existingSkin.get();
+        }
 
         try {
             int retryAttempts = 0;
@@ -139,6 +154,9 @@ public class MineSkinAPIImpl implements MineSkinAPI {
                         yield Optional.empty(); // try again
                     }
                     case "no_account_available" -> throw new MineSkinExceptionShared(Message.ERROR_MS_FULL);
+                    case "invalid_image_url" -> throw new MineSkinExceptionShared(Message.ERROR_GENERIC,
+                            Placeholder.unparsed("message", "MineSkin could not download an image from \"%s\" (%s). Make sure the url points directly to a .png file."
+                                    .formatted(imageUrl, error.getMessage() == null ? error.getCode() : error.getMessage())));
                     case "invalid_api_key" -> {
                         logger.severe("[ERROR] MineSkin API key is invalid! Reason: %s".formatted(error));
                         switch (error.getMessage()) {
@@ -162,6 +180,95 @@ public class MineSkinAPIImpl implements MineSkinAPI {
             logger.debug("[ERROR] MineSkin Failed! Unknown error: (Image URL: %s) %d".formatted(imageUrl, httpResponse.statusCode()));
             throw new MineSkinExceptionShared(Message.ERROR_MS_API_FAILED);
         }
+    }
+
+    /**
+     * Resolves a MineSkin short link (as handed out by the skin upload page) to the skin data that is
+     * already stored on MineSkin, without consuming a new generation.
+     *
+     * @return the resolved skin, or empty when the url is not a MineSkin short link or could not be
+     * resolved (the caller then falls back to a normal generation request).
+     */
+    private Optional<MineSkinResponse> resolveMineSkinShortLink(String imageUrl, @Nullable SkinVariant skinVariant) throws DataRequestException {
+        Optional<String> skinId = extractMineSkinSkinId(imageUrl);
+        if (skinId.isEmpty()) {
+            return Optional.empty();
+        }
+
+        try {
+            metricsCounter.increment(MetricsCounter.Service.MINESKIN_CALLS);
+
+            Map<String, String> headers = new HashMap<>();
+            getApiKey(settings).ifPresent(s ->
+                    headers.put("Authorization", "Bearer %s".formatted(s)));
+
+            HttpResponse httpResponse = httpClient.execute(
+                    URI.create(MINESKIN_SKIN_ENDPOINT + skinId.get()),
+                    null,
+                    HttpClient.HttpType.JSON,
+                    MINESKIN_USER_AGENT,
+                    HttpClient.HttpMethod.GET,
+                    headers,
+                    30_000
+            );
+
+            if (httpResponse.statusCode() != 200) {
+                logger.debug(SRLogLevel.WARNING, "Could not resolve MineSkin short link %s (HTTP %d), falling back to generating a new skin.".formatted(imageUrl, httpResponse.statusCode()));
+                return Optional.empty();
+            }
+
+            MineSkinUrlResponse response = httpResponse.getBodyAs(MineSkinUrlResponse.class);
+            if (response == null || !response.isSuccess()) {
+                logger.debug(SRLogLevel.WARNING, "Could not resolve MineSkin short link %s, falling back to generating a new skin.".formatted(imageUrl));
+                return Optional.empty();
+            }
+
+            MineSkinUrlResponse.Skin skin = response.getSkin();
+            if (skin == null || skin.getTexture() == null || skin.getTexture().getData() == null) {
+                logger.debug(SRLogLevel.WARNING, "MineSkin short link %s did not contain any skin data, falling back to generating a new skin.".formatted(imageUrl));
+                return Optional.empty();
+            }
+
+            MineSkinUrlResponse.Skin.Texture.Data textureData = skin.getTexture().getData();
+            SkinProperty property = SkinProperty.of(textureData.getValue(), textureData.getSignature());
+
+            logger.debug("Resolved MineSkin short link %s to skin %s without generating a new skin.".formatted(imageUrl, skin.getUuid()));
+
+            return Optional.of(MineSkinResponse.of(property, skin.getUuid(),
+                    skinVariant, PropertyUtils.getSkinVariant(property)));
+        } catch (IOException e) {
+            logger.debug(SRLogLevel.WARNING, "Failed to resolve MineSkin short link %s, falling back to generating a new skin.".formatted(imageUrl), e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Extracts the skin id from a MineSkin short link like {@code https://minesk.in/<uuid>}.
+     */
+    private Optional<String> extractMineSkinSkinId(String imageUrl) {
+        Optional<URL> urlOptional = SRHelpers.parseURL(imageUrl);
+        if (urlOptional.isEmpty()) {
+            return Optional.empty();
+        }
+
+        URL url = urlOptional.get();
+        String host = url.getHost();
+        if (host == null || !MINESKIN_SHORT_LINK_HOSTS.contains(host.toLowerCase(Locale.ROOT))) {
+            return Optional.empty();
+        }
+
+        String path = url.getPath();
+        if (path == null) {
+            return Optional.empty();
+        }
+
+        String skinId = path.startsWith("/") ? path.substring(1) : path;
+        int nextSlash = skinId.indexOf('/');
+        if (nextSlash != -1) {
+            skinId = skinId.substring(0, nextSlash);
+        }
+
+        return skinId.isEmpty() || !skinId.matches("[A-Za-z0-9-]+") ? Optional.empty() : Optional.of(skinId);
     }
 
     private HttpResponse queryURL(String url, @Nullable SkinVariant skinVariant) throws IOException {
